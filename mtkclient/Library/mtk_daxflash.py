@@ -18,32 +18,18 @@ from queue import Queue
 from threading import Thread, Event
 
 rq = Queue()
-wq = Queue()
 
-def writedata(filename,rq,event):
-    pos=0
+def writedata(filename, rq):
+    pos = 0
     with open(filename, "wb") as wf:
         while True:
-            if event.is_set():
-                break
             data = rq.get()
-            pos+=len(data)
+            if data is None:
+                break
+            pos += len(data)
             wf.write(data)
             rq.task_done()
 
-def readdata(filename,wq,pagesize,event):
-    pos=0
-    with open(filename, "rb") as rf:
-        bytestoread=os.stat(filename).st_size
-        while bytestoread>0:
-            if event.is_set():
-                break
-            data = rf.read(pagesize)
-            size = len(data)
-            wq.put(data)
-            pos += size
-            bytestoread-=size
-            wq.task_done()
 
 class NandExtension:
     # uni=0, multi=1
@@ -889,28 +875,26 @@ class DAXFlash(metaclass=LogBase):
             bytestoread = length
             total = length
             if filename != "":
-                event = Event()
-                worker = Thread(target=writedata, args=(filename, rq, event), daemon=True)
+                worker = Thread(target=writedata, args=(filename, rq), daemon=True)
                 worker.start()
-                resdata = bytearray()
                 while bytestoread > 0:
                     status = self.usbread(4 + 4 + 4)
                     magic, datatype, slength = unpack("<III", status)
                     if magic == 0xFEEEEEEF:
                         resdata = self.usbread(slength)
-                    if len(resdata) > 4:
-                        rq.put(resdata)
-                        stmp = pack("<III", self.Cmd.MAGIC, self.DataType.DT_PROTOCOL_FLOW, 4)
-                        data = pack("<I", 0)
-                        self.usbwrite(stmp)
-                        self.usbwrite(data)
-                        bytestoread -= len(resdata)
-                        bytesread += len(resdata)
-                        if display:
-                            self.mtk.daloader.progress.show_progress("Read", bytesread, total, display)
-                    elif slength == 4:
-                        if unpack("<I", resdata)[0] != 0:
-                            break
+                        if slength > 4:
+                            rq.put(resdata)
+                            stmp = pack("<III", self.Cmd.MAGIC, self.DataType.DT_PROTOCOL_FLOW, 4)
+                            data = pack("<I", 0)
+                            self.usbwrite(stmp)
+                            self.usbwrite(data)
+                            bytestoread -= len(resdata)
+                            bytesread += len(resdata)
+                            if display:
+                                self.mtk.daloader.progress.show_progress("Read", bytesread, total, display)
+                        elif slength == 4:
+                            if unpack("<I", resdata)[0] != 0:
+                                break
                 status = self.usbread(4 + 4 + 4)
                 magic, datatype, slength = unpack("<III", status)
                 if magic == 0xFEEEEEEF:
@@ -919,9 +903,11 @@ class DAXFlash(metaclass=LogBase):
                         if unpack("<I", resdata)[0] == 0:
                             if display:
                                 self.mtk.daloader.progress.show_progress("Read", total, total, display)
-                            event.set()
+                            rq.put(None)
+                            worker.join(60)
                             return True
-                event.set()
+                rq.put(None)
+                worker.join(60)
                 return False
             else:
                 buffer = bytearray()
@@ -1170,7 +1156,7 @@ class DAXFlash(metaclass=LogBase):
             self.info("Reconnecting to preloader")
             self.config.set_gui_status(self.config.tr("Reconnecting to preloader"))
             self.set_usb_speed()
-            self.mtk.port.close(reset=True)
+            self.mtk.port.close(reset=False)
             time.sleep(2)
             while not self.mtk.port.cdc.connect():
                 time.sleep(0.5)
